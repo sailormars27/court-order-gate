@@ -543,7 +543,15 @@ const picked = candidates
 
     {/* Focused card */}
     {activeItem ? (
-      <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+<div
+  style={{
+    border: "1px solid #ddd",
+    borderRadius: 12,
+    padding: 12,
+    background: "white",
+    color: "#111",
+  }}
+>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
           <div style={{ fontWeight: 800 }}>
   Annotation{" "}
@@ -579,6 +587,40 @@ const picked = candidates
           placeholder="Task / Demand (plain English)"
           style={{ width: "100%", marginTop: 8, minHeight: 72 }}
         />
+
+<div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+  <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+    Responsible party
+    <input
+      value={activeItem.responsible}
+      onChange={(e) =>
+        setItems((prev) =>
+          prev.map((x) =>
+            x.task_id === activeItem.task_id ? { ...x, responsible: e.target.value } : x
+          )
+        )
+      }
+      placeholder="e.g., Plaintiff / Defendant"
+      style={{ padding: 6, minWidth: 220 }}
+    />
+  </label>
+
+  <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+    Due date
+    <input
+      type="date"
+      value={activeItem.due_date ?? ""}
+      onChange={(e) =>
+        setItems((prev) =>
+          prev.map((x) =>
+            x.task_id === activeItem.task_id ? { ...x, due_date: e.target.value || null } : x
+          )
+        )
+      }
+      style={{ padding: 6 }}
+    />
+  </label>
+</div>
 
         <div style={{ marginTop: 8, fontSize: 13 }}>
           <b>Due:</b>{" "}
