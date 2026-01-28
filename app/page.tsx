@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -48,6 +48,10 @@ export default function Home() {
   const [showAnno, setShowAnno] = useState<boolean>(true);
   const [isClient, setIsClient] = useState(false);
 
+  // Section highlight state + ref
+  const [sectionBlock, setSectionBlock] = useState<string>("");
+  const pdfWrapRef = useRef<HTMLDivElement | null>(null);
+
   // Case metadata for export (manual for MVP)
   const [caseCaption, setCaseCaption] = useState<string>("");
   const [indexNo, setIndexNo] = useState<string>("");
@@ -89,6 +93,14 @@ export default function Home() {
 
   function normalizeSpaces(s: string) {
     return s.replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeActionForExport(action: string) {
+    return action.replace(/^furnish\s+/i, "").replace(/^shall\s+/i, "").trim();
+  }
+
+  function normToken(w: string) {
+    return (w || "").replace(/[^\w]/g, "").toLowerCase();
   }
 
   function isJunkLine(l: string) {
@@ -150,40 +162,67 @@ export default function Home() {
     return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
   }
 
-  function isISODate(s: string) {
-    return /^\d{4}-\d{2}-\d{2}$/.test(s);
-  }
-
   function parseDateToISO(input: string): string | null {
     const t = input.trim();
+    if (!t) return null;
 
-    if (isISODate(t)) return t;
+    // Accept ISO already
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
 
-    const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    // Allow digits-only: MMDDYYYY or MMDDYY
+    const digits = t.replace(/[^\d]/g, "");
+    if (digits.length === 8) {
+      const mm = digits.slice(0, 2);
+      const dd = digits.slice(2, 4);
+      const yyyy = digits.slice(4, 8);
+      return validateAndFormat(mm, dd, yyyy);
+    }
+    if (digits.length === 6) {
+      const mm = digits.slice(0, 2);
+      const dd = digits.slice(2, 4);
+      const yy = digits.slice(4, 6);
+      const yyyy = normalize2DigitYear(yy);
+      return validateAndFormat(mm, dd, yyyy);
+    }
+
+    // Allow M/D/YYYY, MM/DD/YYYY, M/D/YY, MM/DD/YY
+    const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
     if (!m) return null;
 
     const mm = m[1].padStart(2, "0");
     const dd = m[2].padStart(2, "0");
-    const yyyy = m[3];
+    const yyyy = m[3].length === 2 ? normalize2DigitYear(m[3]) : m[3];
 
-    const monthN = Number(mm);
-    const dayN = Number(dd);
-    const yearN = Number(yyyy);
-    if (monthN < 1 || monthN > 12) return null;
-    if (dayN < 1 || dayN > 31) return null;
-    if (yearN < 1900 || yearN > 2100) return null;
+    return validateAndFormat(mm, dd, yyyy);
 
-    return `${yyyy}-${mm}-${dd}`;
+    function normalize2DigitYear(yy: string) {
+      const n = Number(yy);
+      const year = n >= 70 ? 1900 + n : 2000 + n;
+      return String(year);
+    }
+
+    function validateAndFormat(mm: string, dd: string, yyyy: string): string | null {
+      const monthN = Number(mm);
+      const dayN = Number(dd);
+      const yearN = Number(yyyy);
+
+      if (!Number.isFinite(monthN) || monthN < 1 || monthN > 12) return null;
+      if (!Number.isFinite(dayN) || dayN < 1 || dayN > 31) return null;
+      if (!Number.isFinite(yearN) || yearN < 1900 || yearN > 2100) return null;
+
+      const d = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
+      const ok = d.getFullYear() === yearN && d.getMonth() + 1 === monthN && d.getDate() === dayN;
+
+      return ok ? `${yyyy}-${mm}-${dd}` : null;
+    }
   }
 
   function findRelativeRule(line: string): string | null {
     const s = line.replace(/\s+/g, " ").trim();
 
-    // within 45 days / no later than 45 days
     const m1 = s.match(/\b(within|no later than)\s+(\d+)\s+(day|days|week|weeks|month|months)\b/i);
     if (m1) return m1[0];
 
-    // forty-five (45) days -> normalize to "45 days"
     const m2 = s.match(/\b([a-z]+(?:-[a-z]+)?)\s*\((\d+)\)\s*(day|days|week|weeks|month|months)\b/i);
     if (m2) return `${m2[2]} ${m2[3]}`;
 
@@ -194,48 +233,62 @@ export default function Home() {
   // Extraction (Section 1)
   // -------------------------
   function extractInsuranceSectionBlock(rawText: string): string {
-  const lines = rawText
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+    const lines = rawText
+      .split(/\n+/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
 
-  // Find the first line that looks like the Insurance Coverage section header
-  const startIdx = lines.findIndex((l) =>
-    /insurance\s+coverage/i.test(l)
-  );
+    const startIdx = lines.findIndex((l) => /^\(?1\)?\s*/.test(l));
+    if (startIdx === -1) return "";
 
-  if (startIdx === -1) return "";
+    const out: string[] = [];
+    for (let i = startIdx; i < Math.min(lines.length, startIdx + 60); i++) {
+      const l = lines[i];
 
-  // Take a block after the header until the next section header (or cap)
-  const out: string[] = [];
-  for (let i = startIdx; i < Math.min(lines.length, startIdx + 60); i++) {
-    const l = lines[i];
+      if (i > startIdx && /^\(\d+\)\s/.test(l)) break;
+      if (i > startIdx && /^section\s+\d+/i.test(l)) break;
 
-    // Stop if we hit the next section marker (very rough but effective)
-    if (i > startIdx && /^\(\d+\)\s/.test(l)) break;
-    if (i > startIdx && /^section\s+\d+/i.test(l)) break;
+      out.push(l);
+    }
 
-    out.push(l);
+    return out.join("\n");
   }
-
-  return out.join("\n");
-}
 
   function extractMvpItemsFromText(rawText: string): ReviewItem[] {
     const scopedText = extractInsuranceSectionBlock(rawText) || rawText;
+
     const lines = scopedText
       .split(/\n+/)
       .map((l) => l.trim())
       .filter((l) => l.length > 0)
       .filter((l) => !isJunkLine(l));
 
-    const s1Line =
-      lines.find((l) => /^\(1\)\s*/.test(l) && /Insurance Coverage/i.test(l)) ?? null;
+    const windowLine = (i: number, n = 3) => lines.slice(i, i + n).join(" ").replace(/\s+/g, " ").trim();
+
+    let s1Line: string | null = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const w = windowLine(i, 3);
+      if (/(^|\s)\(?1\)?[.)]?\s*insurance\s*coverage\b/i.test(w) || /\binsurance\s*coverage\b/i.test(w)) {
+        s1Line = w;
+        break;
+      }
+    }
+
+    if (!s1Line) {
+      for (let i = 0; i < lines.length; i++) {
+        const w = windowLine(i, 4);
+        if (/\binsurance\b/i.test(w) && /(furnish|policy|carrier|coverage|on or before|within)\b/i.test(w)) {
+          s1Line = w;
+          break;
+        }
+      }
+    }
 
     if (!s1Line) return [];
 
-    const deadlineRaw = findExplicitDateRaw(s1Line); // often null when handwritten
-    const relRule = findRelativeRule(s1Line); // catches "within 45 days" when printed
+    const deadlineRaw = findExplicitDateRaw(s1Line);
+    const relRule = findRelativeRule(s1Line);
 
     const confidence: ReviewItem["confidence"] = deadlineRaw ? "High" : relRule ? "Med" : "Low";
 
@@ -248,11 +301,12 @@ export default function Home() {
         actor: "Defendant",
         actor_raw: null,
 
-        action: "furnish insurance coverage information",
+        // FIX (1): drop "furnish"
+        action: "insurance coverage information",
         condition: "if not already provided",
 
-        due_date: null, // user enters ISO via text input
-        due_rule: deadlineRaw ?? relRule, // shows any printed/parsed rule if present
+        due_date: null,
+        due_rule: deadlineRaw ?? relRule,
 
         confidence,
         risk: "high",
@@ -279,11 +333,12 @@ export default function Home() {
     setText("");
     setItems([]);
     setActiveId(null);
+    setSectionBlock("");
 
     const formData = new FormData();
     formData.append("file", file);
 
-    const res = await fetch("/api/parse", { method: "POST", body: formData });
+    const res = await fetch("/api/parse?forceOcr=1", { method: "POST", body: formData });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -297,16 +352,17 @@ export default function Home() {
     setStatus(`Parsed ${data.filename} (${data.pages ?? "?"} pages)`);
     setText(parsedText);
 
+    // FIX (3): store section block for highlight
+    setSectionBlock(extractInsuranceSectionBlock(parsedText));
+
     const extracted = extractMvpItemsFromText(parsedText);
     setItems(extracted);
     setActiveId(extracted[0]?.task_id ?? null);
 
     setShowAnno(true);
 
-    if (data.source_quality === "empty_or_scanned" || parsedText.trim().length < 30) {
-      setStatus(
-        `Parsed ${data.filename} (${data.pages ?? "?"} pages) — Looks scanned/low-text. OCR text may be needed for best results.`
-      );
+    if (!extracted.length) {
+      setStatus(`Parsed ${data.filename} (${data.pages ?? "?"} pages) — no Section 1 obligations detected.`);
     }
   }
 
@@ -316,33 +372,120 @@ export default function Home() {
   const canExportActive = useMemo(() => {
     if (!activeItem) return false;
     const actorOk = activeItem.actor.trim().length > 0;
-    const deadlineOk = !!activeItem.due_date || !!activeItem.due_rule; // date OR rule
+    const deadlineOk = !!activeItem.due_date || !!activeItem.due_rule;
     const checksOk = activeItem.checks.applies && activeItem.checks.deadline && activeItem.checks.ready;
     const metaOk = caseCaption.trim().length > 0 && indexNo.trim().length > 0;
     return actorOk && deadlineOk && checksOk && metaOk && activeItem.status === "Approved";
   }, [activeItem, caseCaption, indexNo]);
 
   async function copyExportLine() {
-    if (!activeItem) return;
 
-    const duePretty = activeItem.due_date
-      ? formatISODate(activeItem.due_date)
-      : activeItem.due_rule
-      ? activeItem.due_rule
-      : "DATE TBD";
+  setStatus("Copy button clicked.");
 
-    const titleLine = `${caseCaption} | ${indexNo}`;
-    const bodyLine = `Insurance coverage information due ${duePretty} (Actor: ${activeItem.actor}) (p.${activeItem.citation_page ?? 1})`;
-    const block = `${titleLine}\n\n${bodyLine}`;
+  if (!activeItem) return;
 
-    try {
-      await navigator.clipboard.writeText(block);
-      setStatus("Copied docket/calendar entry to clipboard.");
-    } catch {
-      window.prompt("Copy this docket entry:", block);
-      setStatus("Clipboard blocked; used fallback copy prompt.");
-    }
+  const duePretty = activeItem.due_date
+    ? formatISODate(activeItem.due_date)
+    : activeItem.due_rule
+    ? activeItem.due_rule
+    : "DATE TBD";
+
+  const titleLine = `${caseCaption} | ${indexNo}`;
+  const actionClean = normalizeActionForExport(activeItem.action);
+  const bodyLine = `${actionClean} due ${duePretty} (Actor: ${activeItem.actor}) (p.${activeItem.citation_page ?? 1})`;
+  const block = `${titleLine}\n\n${bodyLine}`;
+
+  setStatus("Copying…");
+
+  // If not secure, skip straight to fallback
+  if (!window.isSecureContext) {
+    window.prompt("Copy this docket entry:", block);
+    setStatus("Clipboard not available here; used manual copy prompt.");
+    return;
   }
+
+  try {
+    await navigator.clipboard.writeText(block);
+    setStatus("Copied docket/calendar entry to clipboard.");
+    return;
+  } catch {
+    // Fallback: execCommand copy
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = block;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "0";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+
+      if (ok) {
+        setStatus("Copied docket/calendar entry to clipboard.");
+        return;
+      }
+    } catch {
+      // ignore and drop to prompt
+    }
+
+    window.prompt("Copy this docket entry:", block);
+    setStatus("Clipboard blocked; used manual copy prompt.");
+  }
+}
+
+  // -------------------------
+  // FIX (3): highlight Section 1 in PDF text layer (NO customTextRenderer)
+  // -------------------------
+  const sectionTokenSet = useMemo(() => {
+    const b = normalizeSpaces(sectionBlock || "").toLowerCase();
+    if (!b) return new Set<string>();
+
+    const tokens = b
+      .split(/\s+/)
+      .map(normToken)
+      .filter((t) => t.length >= 5);
+
+    return new Set(tokens);
+  }, [sectionBlock]);
+
+  useEffect(() => {
+    if (!pdfUrl) return;
+    if (!sectionTokenSet.size) return;
+
+    const root = pdfWrapRef.current;
+    if (!root) return;
+
+    const timer = window.setTimeout(() => {
+      const spans = root.querySelectorAll(".react-pdf__Page__textContent span");
+
+      spans.forEach((span) => {
+        const raw = span.textContent || "";
+        const words = raw
+          .replace(/\s+/g, " ")
+          .toLowerCase()
+          .split(" ")
+          .map(normToken)
+          .filter((w) => w.length >= 5);
+
+        const hit = words.some((w) => sectionTokenSet.has(w));
+
+        const el = span as HTMLElement;
+        if (hit) {
+          el.style.background = "rgba(255, 230, 150, 0.35)";
+          el.style.borderRadius = "3px";
+        } else {
+          el.style.background = "";
+          el.style.borderRadius = "";
+        }
+      });
+    }, 150);
+
+    return () => window.clearTimeout(timer);
+  }, [pdfUrl, sectionTokenSet]);
 
   // -------------------------
   // Demo-style card
@@ -363,7 +506,6 @@ export default function Home() {
       item.checks.deadline &&
       item.checks.ready;
 
-    // local UI state for deadline entry
     const [deadlineMode, setDeadlineMode] = useState<"date" | "rule">(
       item.due_date ? "date" : item.due_rule ? "rule" : "date"
     );
@@ -378,7 +520,6 @@ export default function Home() {
 
     return (
       <div style={{ border: "1px solid #e5e5e5", borderRadius: 14, padding: 14, background: "white" }}>
-        {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
           <div>
             <div style={{ fontWeight: 800, fontSize: 14 }}>Annotation</div>
@@ -404,7 +545,6 @@ export default function Home() {
         <div style={{ fontSize: 12, opacity: 0.75 }}>Obligation</div>
         <div style={{ fontWeight: 800, marginTop: 2 }}>Insurance Coverage</div>
 
-        {/* Fields */}
         <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10, fontSize: 13 }}>
           <div>
             <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 4 }}>Actor</div>
@@ -433,7 +573,6 @@ export default function Home() {
             </div>
           ) : null}
 
-          {/* Deadline with Date/Rule */}
           <div>
             <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 6 }}>Deadline</div>
 
@@ -483,22 +622,17 @@ export default function Home() {
               <>
                 <input
                   type="text"
-                  inputMode="numeric"
                   value={dateInput}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setDateInput(v);
-                    const iso = parseDateToISO(v);
-                    onPatch({ due_date: iso }); // store ISO only if valid
+                  onChange={(e) => setDateInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
                   }}
                   onBlur={() => {
                     const iso = parseDateToISO(dateInput);
                     if (!iso) {
-                      setDateInput("");
                       onPatch({ due_date: null });
                       return;
                     }
-                    // Normalize display to MM/DD/YYYY
                     const [yyyy, mm, dd] = iso.split("-");
                     setDateInput(`${mm}/${dd}/${yyyy}`);
                     onPatch({ due_date: iso });
@@ -506,6 +640,7 @@ export default function Home() {
                   placeholder="MM/DD/YYYY"
                   style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
                 />
+
                 <div style={{ fontSize: 11, opacity: 0.6, marginTop: 6 }}>
                   stored: {item.due_date ? item.due_date : "—"} &nbsp;•&nbsp; raw: {item.due_rule ? item.due_rule : "—"}
                 </div>
@@ -515,31 +650,29 @@ export default function Home() {
                 <input
                   type="text"
                   value={ruleInput}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setRuleInput(v);
-                    onPatch({ due_rule: v.trim().length ? v.trim() : null });
+                  onChange={(e) => setRuleInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
                   }}
                   onBlur={() => {
-                    const v = ruleInput.trim();
-                    if (!v) onPatch({ due_rule: null });
+                    const trimmed = ruleInput.trim();
+                    onPatch({ due_rule: trimmed ? trimmed : null });
                   }}
-                  placeholder="within 45 days / no later than 45 days"
+                  placeholder="e.g., within 45 days"
                   style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
                 />
+
                 <div style={{ fontSize: 11, opacity: 0.6, marginTop: 6 }}>raw: {item.due_rule ? item.due_rule : "—"}</div>
               </>
             )}
           </div>
         </div>
 
-        {/* Citation */}
         <div style={{ marginTop: 12, border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#fafafa" }}>
           <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.75 }}>Citation (p.{item.citation_page ?? 1})</div>
           <div style={{ fontSize: 12, marginTop: 6, opacity: 0.9 }}>{item.citation_excerpt}</div>
         </div>
 
-        {/* Checks */}
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
           <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input
@@ -569,7 +702,6 @@ export default function Home() {
           </label>
         </div>
 
-        {/* Approve */}
         <button
           disabled={!canApprove}
           onClick={() => onPatch({ status: "Approved" })}
@@ -612,7 +744,6 @@ export default function Home() {
     >
       <div style={{ height: "100%" }}>
         <div style={{ width: "100%", border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-          {/* Controls */}
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
             <input
               type="file"
@@ -624,6 +755,7 @@ export default function Home() {
                 setText("");
                 setItems([]);
                 setActiveId(null);
+                setSectionBlock("");
               }}
             />
 
@@ -638,13 +770,13 @@ export default function Home() {
 
           {status && <div style={{ marginBottom: 12, fontSize: 12, opacity: 0.8 }}>{status}</div>}
 
-          {/* PDF viewport */}
           <div style={{ position: "relative", height: "calc(100vh - 120px)" }}>
             {pdfUrl ? (
               <>
                 {isClient ? (
                   <Document file={pdfUrl}>
-                    <div style={{ position: "relative", display: "inline-block" }}>
+                    <div ref={pdfWrapRef} style={{ position: "relative", display: "inline-block" }}>
+                      {/* NO customTextRenderer */}
                       <Page pageNumber={1} width={900} />
                     </div>
                   </Document>
@@ -678,7 +810,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* RIGHT DRAWER */}
       {pdfUrl && showAnno && (
         <div
           style={{
@@ -711,7 +842,6 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Export metadata */}
           <div style={{ marginTop: 12, border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#fafafa" }}>
             <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.75 }}>Export metadata</div>
 
@@ -752,7 +882,6 @@ export default function Home() {
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {/* Compact list */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto", paddingRight: 2 }}>
                   {items.map((it, idx) => {
                     const selected = it.task_id === activeId;
@@ -772,9 +901,7 @@ export default function Home() {
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                           <div style={{ fontWeight: 700, fontSize: 13 }}>
                             #{idx + 1} {it.obligation_title}
-                            <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.7 }}>
-                              {it.status === "Approved" ? "✅" : ""}
-                            </span>
+                            <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.7 }}>{it.status === "Approved" ? "✅" : ""}</span>
                           </div>
                           <div style={{ fontSize: 12, opacity: 0.75 }}>{it.confidence}</div>
                         </div>
@@ -785,19 +912,15 @@ export default function Home() {
                   })}
                 </div>
 
-                {/* Focused card */}
                 {activeItem ? (
                   <DemoStyleAnnotationCard
                     item={activeItem}
                     onPatch={(patch) => {
-                      setItems((prev) =>
-                        prev.map((x) => (x.task_id === activeItem.task_id ? { ...x, ...patch } : x))
-                      );
+                      setItems((prev) => prev.map((x) => (x.task_id === activeItem.task_id ? { ...x, ...patch } : x)));
                     }}
                   />
                 ) : null}
 
-                {/* Export preview */}
                 {activeItem ? (
                   <div style={{ border: "1px solid #e5e5e5", borderRadius: 14, padding: 14, background: "white" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -811,55 +934,51 @@ export default function Home() {
                     </div>
 
                     <div style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#fafafa" }}>
-                      <div style={{ fontWeight: 700, fontSize: 12 }}>
-                        {caseCaption.trim() ? caseCaption.trim() : "Case caption (required)"}
-                      </div>
+                      <div style={{ fontWeight: 700, fontSize: 12 }}>{caseCaption.trim() ? caseCaption.trim() : "Case caption (required)"}</div>
                       <div style={{ fontSize: 12, opacity: 0.85, marginTop: 4 }}>
                         Index No. {indexNo.trim() ? indexNo.trim() : "Index no. (required)"}
                       </div>
 
                       <div style={{ marginTop: 10, fontSize: 12 }}>
-                        {activeItem.action} due{" "}
-                        {activeItem.due_date
-                          ? formatISODate(activeItem.due_date)
-                          : activeItem.due_rule
-                          ? activeItem.due_rule
-                          : "DEADLINE (required)"}{" "}
+                        {normalizeActionForExport(activeItem.action)} due{" "}
+                        {activeItem.due_date ? formatISODate(activeItem.due_date) : activeItem.due_rule ? activeItem.due_rule : "DEADLINE (required)"}{" "}
                         <span style={{ opacity: 0.75 }}>(Actor: {activeItem.actor || "…"})</span>
                       </div>
 
                       {!canExportActive ? (
                         <div style={{ marginTop: 8, fontSize: 11, opacity: 0.65 }}>
-                          Export blocked until: caption + index are filled, obligation approved, checkboxes confirmed, and deadline entered (date or rule).
+                          Copy blocked until: caption + index are filled, obligation approved, checkboxes confirmed, and deadline entered (date or rule).
                         </div>
                       ) : null}
                     </div>
 
-                    <button
-                      disabled={!canExportActive}
-                      onClick={copyExportLine}
-                      style={{
-                        marginTop: 12,
-                        width: "100%",
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        border: "1px solid #ddd",
-                        background: canExportActive ? "white" : "#f3f4f6",
-                        cursor: canExportActive ? "pointer" : "not-allowed",
-                        fontWeight: 800,
-                      }}
-                    >
-                      Export line
-                    </button>
+<button
+  type="button"
+  disabled={!canExportActive}
+  onClick={() => {
+    console.log("[copy] clicked");
+    copyExportLine();
+  }}
+  style={{
+    marginTop: 12,
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid #ddd",
+    background: canExportActive ? "white" : "#f3f4f6",
+    cursor: canExportActive ? "pointer" : "not-allowed",
+    fontWeight: 800,
+  }}
+>
+  Copy to clipboard
+</button>
+
                   </div>
                 ) : null}
 
-                {/* Debug text preview */}
                 {text && (
                   <details style={{ marginTop: 12 }}>
-                    <summary style={{ cursor: "pointer", fontSize: 12, opacity: 0.8 }}>
-                      Debug: extracted text preview
-                    </summary>
+                    <summary style={{ cursor: "pointer", fontSize: 12, opacity: 0.8 }}>Debug: extracted text preview</summary>
                     <pre
                       style={{
                         whiteSpace: "pre-wrap",

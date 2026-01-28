@@ -102,7 +102,7 @@ export async function POST(req: Request) {
 
       try {
         const { stdout, stderr } = await execFileAsync("ocrmypdf", [
-          "--skip-text",
+          "--force-ocr",
           "--deskew",
           "--rotate-pages",
           "--optimize",
