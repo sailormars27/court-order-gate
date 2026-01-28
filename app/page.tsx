@@ -193,8 +193,37 @@ export default function Home() {
   // -------------------------
   // Extraction (Section 1)
   // -------------------------
+  function extractInsuranceSectionBlock(rawText: string): string {
+  const lines = rawText
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  // Find the first line that looks like the Insurance Coverage section header
+  const startIdx = lines.findIndex((l) =>
+    /insurance\s+coverage/i.test(l)
+  );
+
+  if (startIdx === -1) return "";
+
+  // Take a block after the header until the next section header (or cap)
+  const out: string[] = [];
+  for (let i = startIdx; i < Math.min(lines.length, startIdx + 60); i++) {
+    const l = lines[i];
+
+    // Stop if we hit the next section marker (very rough but effective)
+    if (i > startIdx && /^\(\d+\)\s/.test(l)) break;
+    if (i > startIdx && /^section\s+\d+/i.test(l)) break;
+
+    out.push(l);
+  }
+
+  return out.join("\n");
+}
+
   function extractMvpItemsFromText(rawText: string): ReviewItem[] {
-    const lines = rawText
+    const scopedText = extractInsuranceSectionBlock(rawText) || rawText;
+    const lines = scopedText
       .split(/\n+/)
       .map((l) => l.trim())
       .filter((l) => l.length > 0)
