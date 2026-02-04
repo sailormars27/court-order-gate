@@ -548,16 +548,18 @@ export default function Home() {
         <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10, fontSize: 13 }}>
           <div>
             <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 4 }}>Actor</div>
-            <select
-              value={item.actor}
-              onChange={(e) => onPatch({ actor: e.target.value })}
-              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
-            >
-              <option value="">Select…</option>
-              <option value="Plaintiff">Plaintiff</option>
-              <option value="Defendant">Defendant</option>
-              <option value="All Parties">All Parties</option>
-            </select>
+          <select
+  value={item.actor}
+  onChange={(e) => onPatch({ actor: e.target.value })}
+  style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
+>
+  <option value="">Select…</option>
+  <option value="Plaintiff">Plaintiff</option>
+  <option value="Defendant">Defendant</option>
+  <option value="All Defendants">All Defendants</option>
+  <option value="All Parties">All Parties</option>
+</select>
+
             <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>raw: {item.actor_raw ? item.actor_raw : "—"}</div>
           </div>
 
@@ -928,6 +930,10 @@ export default function Home() {
                         <div style={{ fontSize: 12, opacity: 0.75 }}>Export Preview</div>
                         <div style={{ fontWeight: 800 }}>Docket entry + ticklers</div>
                       </div>
+                      <div style={{ marginTop: 4, fontSize: 11, opacity: 0.65 }}>
+  <strong>Standard ticklers: 30, 14, 7, 3, and 1 day(s) before the due date.</strong>
+</div>
+
                       <div style={{ fontSize: 11, padding: "4px 10px", borderRadius: 999, border: "1px solid #eee", background: "#fafafa" }}>
                         Firm format: caption + index
                       </div>
@@ -951,6 +957,10 @@ export default function Home() {
                         </div>
                       ) : null}
                     </div>
+                    
+<div style={{ marginTop: 10, fontSize: 11, opacity: 0.65 }}>
+  <strong>Audit trail:</strong> Docketed by Maria.
+</div>
 
 <button
   type="button"
